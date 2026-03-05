@@ -79,76 +79,122 @@ class BusinessGovCrawler(BaseCrawler):
 
     async def parse_detail(self, url: str, html: str) -> dict:
         """Parse a grant detail page from business.gov.au."""
+        import re as _re
+
         soup = get_soup(html)
         data: dict = {"source_url": url, "raw_html": html}
+        full_text = soup.get_text()
 
-        # Title from h1
+        # ── Title ──
         h1 = soup.select_one("h1")
         if h1:
             data["title"] = clean_text(h1.get_text())
 
-        # Main content
-        content_el = soup.select_one("main, article, .content, #content, .page-content")
-        if content_el:
-            # Get description from first few paragraphs
-            paragraphs = content_el.find_all("p", limit=5)
-            desc_parts = [clean_text(p.get_text()) for p in paragraphs if clean_text(p.get_text())]
-            if desc_parts:
-                data["description"] = " ".join(desc_parts)
+        # ── Status (from .tag badge) ──
+        tag_el = soup.select_one(".tag")
+        if tag_el:
+            tag_text = clean_text(tag_el.get_text())
+            if tag_text:
+                data["status"] = tag_text.capitalize()
 
-        # Scan all text for structured fields
-        full_text = soup.get_text()
+        # Fallback status from status-indicator class
+        if "status" not in data:
+            for cls_prefix in ["status-indicator-open", "status-indicator-closed"]:
+                indicator = soup.select_one(f".{cls_prefix}")
+                if indicator:
+                    data["status"] = "Open" if "open" in cls_prefix else "Closed"
+                    break
 
-        # Status detection
-        status_keywords = {
-            "open": ["applications are open", "now open", "currently open", "apply now"],
-            "closed": ["applications are closed", "now closed", "currently closed", "closed to applications"],
-            "upcoming": ["opening soon", "not yet open", "applications will open"],
-        }
-        text_lower = full_text.lower()
-        for status, keywords in status_keywords.items():
-            if any(kw in text_lower for kw in keywords):
-                data["status"] = status.capitalize()
+        # ── Closing Date (from #close-date-value) ──
+        close_el = soup.select_one("#close-date-value, .date-value")
+        if close_el:
+            data["closing_date"] = extract_date(close_el.get_text())
+
+        # ── Description (from "About the program" section or meta) ──
+        meta_desc = soup.select_one("meta[name='description']")
+        if meta_desc and meta_desc.get("content"):
+            data["description"] = meta_desc["content"]
+
+        # Enrich with "About the program" section content
+        for h in soup.find_all(["h2", "h3"]):
+            if "about" in (h.get_text() or "").lower():
+                parts = []
+                for sib in h.find_next_siblings(["p", "ul", "ol"], limit=5):
+                    t = clean_text(sib.get_text())
+                    if t:
+                        parts.append(t)
+                if parts:
+                    data["description"] = " ".join(parts)
                 break
 
-        # Scan label-value pairs
-        for el in soup.find_all(["th", "dt", "strong", "h2", "h3", "h4", "b"]):
-            label = (el.get_text() or "").lower().strip().rstrip(":")
-            sibling = el.find_next(["td", "dd", "span", "p", "div", "ul"])
-            if not sibling:
-                continue
-            val = sibling.get_text()
+        # ── Eligibility (from "Who is this for?" / "Eligible entities") ──
+        for h in soup.find_all(["h2", "h3"]):
+            h_text = (h.get_text() or "").lower()
+            if "who is this for" in h_text or "eligible" in h_text:
+                parts = []
+                for sib in h.find_next_siblings(["p", "ul", "ol"], limit=5):
+                    t = clean_text(sib.get_text())
+                    if t:
+                        parts.append(t)
+                    # Stop if we hit another heading
+                    if sib.find_next_sibling(["h2", "h3"]) == sib.next_sibling:
+                        break
+                if parts:
+                    data["eligibility"] = " ".join(parts)[:1000]
+                break
 
-            if any(w in label for w in ["amount", "funding", "value", "grant size", "how much"]):
-                amt_min, amt_max = extract_amount_range(val)
-                if amt_min is not None:
-                    data["amount_min"] = amt_min
-                    data["amount_max"] = amt_max
-
-            elif any(w in label for w in ["eligib", "who can apply", "who is eligible"]):
-                data["eligibility"] = clean_text(val)
-
-            elif any(w in label for w in ["closing", "deadline", "close date", "applications close"]):
-                data["closing_date"] = extract_date(val)
-
-            elif any(w in label for w in ["category", "type", "industry", "sector"]):
-                data["category"] = clean_text(val)
-
-            elif any(w in label for w in ["agency", "department", "administered by"]):
-                data["agency"] = clean_text(val)
-
-        # Try to find amounts from full text if not found yet
+        # ── Funding Amount (from $ patterns in page text) ──
         if "amount_min" not in data:
-            amt_min, amt_max = extract_amount_range(full_text[:3000])
+            amt_min, amt_max = extract_amount_range(full_text[:15000])
             if amt_min is not None:
                 data["amount_min"] = amt_min
                 data["amount_max"] = amt_max
 
-        # Try to extract agency from breadcrumb or meta
+        # ── Agency (from dcterms.creator or page title pattern) ──
+        meta_creator = soup.select_one("meta[name='dcterms.creator']")
+        if meta_creator and meta_creator.get("content", "").strip():
+            data["agency"] = meta_creator["content"].strip()
+
         if "agency" not in data:
-            meta_dept = soup.select_one("meta[name='department'], meta[name='agency']")
-            if meta_dept:
-                data["agency"] = meta_dept.get("content")
+            # Try to extract from title like "MRFF 2026..." -> Medical Research Future Fund
+            title = data.get("title", "")
+            agency_map = {
+                "MRFF": "Medical Research Future Fund",
+                "ARC": "Australian Research Council",
+                "NHMRC": "National Health and Medical Research Council",
+                "CRC": "Department of Industry, Science and Resources",
+                "EMDG": "Austrade",
+                "BRII": "Department of Industry, Science and Resources",
+            }
+            for prefix, agency in agency_map.items():
+                if prefix in title.upper():
+                    data["agency"] = agency
+                    break
+
+        # Fallback agency from URL slug
+        if "agency" not in data:
+            data["agency"] = "Australian Government"
+
+        # ── Category (from dcterms.type or page content) ──
+        meta_type = soup.select_one("meta[name='dcterms.type']")
+        if meta_type and meta_type.get("content", "").strip():
+            dtype = meta_type["content"].strip()
+            if dtype != "grant page":
+                data["category"] = dtype
+
+        if "category" not in data:
+            # Infer category from keywords in title/description
+            text_check = (data.get("title", "") + " " + data.get("description", "")).lower()
+            category_keywords = {
+                "Research": ["research", "innovation", "science", "medical", "nhmrc", "arc"],
+                "Business": ["business", "entrepreneur", "export", "manufacturing", "trade"],
+                "Community": ["community", "heritage", "volunteer", "social", "region"],
+                "Infrastructure": ["infrastructure", "building", "construction"],
+            }
+            for cat, keywords in category_keywords.items():
+                if any(kw in text_check for kw in keywords):
+                    data["category"] = cat
+                    break
 
         return data
 

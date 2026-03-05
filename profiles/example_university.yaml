@@ -1,0 +1,32 @@
+abn: 84 002 705 224
+description: A leading research-intensive university in Australia, ranked in the top
+  50 globally.
+facilities:
+- BSL-2/3 laboratories
+- High-performance computing cluster (2000+ cores)
+- Advanced microscopy suite
+key_personnel:
+- expertise: Functional genomics, CRISPR screening
+  name: Prof. Jane Smith
+  qualifications: PhD (Cambridge), FAHA
+  role: Chief Investigator
+- expertise: Bioinformatics, machine learning
+  name: Dr. Alan Chen
+  qualifications: PhD (MIT)
+  role: Co-Investigator
+name: University of Melbourne
+partnerships:
+- CSIRO
+- Walter and Eliza Hall Institute
+- Peter Doherty Institute
+past_grants:
+- ARC Discovery Project DP210100123 ($450,000) — Genomic approaches to antibiotic
+  resistance
+- NHMRC Ideas Grant APP2001234 ($650,000) — Single-cell analysis of immune responses
+research_strengths:
+- Biomedical sciences and health
+- Engineering and technology
+- Environmental science and sustainability
+- Data science and artificial intelligence
+state: VIC
+type: University

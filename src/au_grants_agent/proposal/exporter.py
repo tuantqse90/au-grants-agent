@@ -202,6 +202,79 @@ model: "{proposal.model}"
 
     # ── PDF ──────────────────────────────────────────────────────
 
+    def _parse_table_rows(self, lines: list[str], start_idx: int) -> tuple[list[list[str]], int]:
+        """Parse consecutive markdown table lines into a list of rows (list of cells).
+
+        Returns (rows, end_idx) where end_idx is the index after the last table line.
+        """
+        rows: list[list[str]] = []
+        i = start_idx
+        while i < len(lines) and lines[i].strip().startswith("|"):
+            line = lines[i].strip()
+            # Split cells, strip outer pipes
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            # Skip separator rows (----, :---, etc.)
+            if cells and not all(
+                all(ch in "-=: " for ch in cell) for cell in cells
+            ):
+                # Strip bold markers from cells
+                cells = [re.sub(r"\*\*(.*?)\*\*", r"\1", c) for c in cells]
+                rows.append(cells)
+            i += 1
+        return rows, i
+
+    def _render_pdf_table(self, pdf, rows: list[list[str]], set_font_fn, safe_write_fn):
+        """Render a markdown table as a proper PDF table with borders."""
+        if not rows:
+            return
+
+        num_cols = max(len(r) for r in rows)
+        # Calculate available width
+        available_w = pdf.w - pdf.l_margin - pdf.r_margin
+        col_w = available_w / num_cols
+
+        # Limit column width for readability
+        if col_w > 60:
+            col_w = 60
+
+        # Check if first row looks like a header (all non-empty)
+        is_header = True
+        row_h = 6
+
+        for row_idx, row in enumerate(rows):
+            # Pad row to num_cols
+            while len(row) < num_cols:
+                row.append("")
+
+            # Check page space — need at least row height
+            if pdf.get_y() > 265:
+                pdf.add_page()
+
+            pdf.set_x(pdf.l_margin)
+
+            if row_idx == 0:
+                # Header row
+                set_font_fn("B", 8)
+                pdf.set_fill_color(0, 200, 100)
+                pdf.set_text_color(255, 255, 255)
+                for cell in row:
+                    pdf.cell(col_w, row_h, cell[:40], border=1, fill=True)
+                pdf.ln(row_h)
+                pdf.set_text_color(0, 0, 0)
+            else:
+                # Data row — alternate background
+                set_font_fn("", 8)
+                if row_idx % 2 == 0:
+                    pdf.set_fill_color(240, 240, 240)
+                    fill = True
+                else:
+                    fill = False
+                for cell in row:
+                    pdf.cell(col_w, row_h, cell[:40], border=1, fill=fill)
+                pdf.ln(row_h)
+
+        pdf.ln(3)
+
     def export_pdf(self, grant: Grant, proposal: Proposal) -> Path:
         """Export proposal as PDF with full Unicode support (Vietnamese)."""
         from fpdf import FPDF
@@ -211,7 +284,7 @@ model: "{proposal.model}"
         filepath = out_dir / filename
 
         pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=20)
+        pdf.set_auto_page_break(auto=True, margin=25)
 
         # ── Load Unicode font ──
         font_path = _find_unicode_font()
@@ -224,7 +297,6 @@ model: "{proposal.model}"
                 if font_bold_path:
                     pdf.add_font("UniFont", "B", font_bold_path, uni=True)
                 else:
-                    # Use regular as bold fallback
                     pdf.add_font("UniFont", "B", font_path, uni=True)
                 uni_font = "UniFont"
                 logger.info("PDF: Using Unicode font from %s", font_path)
@@ -233,129 +305,186 @@ model: "{proposal.model}"
                 uni_font = None
 
         def set_font(style: str = "", size: int = 11):
-            """Set font with Unicode fallback."""
             if uni_font:
                 pdf.set_font(uni_font, style, size)
             else:
                 pdf.set_font("Helvetica", style, size)
 
         def safe_write(text: str, h: int = 6):
-            """Write text, resetting X and handling errors gracefully."""
-            pdf.set_x(pdf.l_margin)  # always reset to left margin
+            pdf.set_x(pdf.l_margin)
             try:
                 pdf.multi_cell(0, h, text)
             except UnicodeEncodeError:
                 safe = text.encode("latin-1", errors="replace").decode("latin-1")
                 pdf.multi_cell(0, h, safe)
             except Exception:
-                # Skip lines that can't be rendered
                 pdf.ln(h)
 
         # ── Title Page ──
         pdf.add_page()
-        pdf.ln(40)
-        set_font("B", 22)
-        safe_write(grant.title)
-        pdf.ln(15)
+        pdf.ln(50)
 
-        set_font("", 13)
+        # Green accent bar
+        pdf.set_fill_color(0, 255, 136)
+        pdf.rect(15, pdf.get_y(), 3, 30, "F")
+
+        pdf.set_x(25)
+        set_font("B", 24)
+        pdf.multi_cell(0, 10, grant.title)
+        pdf.ln(20)
+
+        set_font("", 12)
         meta = [
-            f"Agency: {grant.agency or 'Australian Government'}",
-            f"Organisation: {proposal.org_name or 'N/A'}",
-            f"Date: {datetime.utcnow().strftime('%d %B %Y')}",
-            f"Grant ID: {grant.go_id or grant.id[:8]}",
+            ("Agency", grant.agency or "Australian Government"),
+            ("Organisation", proposal.org_name or "N/A"),
+            ("Date", datetime.utcnow().strftime("%d %B %Y")),
+            ("Grant ID", grant.go_id or grant.id[:8]),
         ]
-        for line in meta:
-            pdf.cell(0, 9, line, ln=True, align="C")
+        for label, value in meta:
+            pdf.set_x(pdf.l_margin)
+            set_font("B", 11)
+            pdf.cell(35, 8, f"{label}:")
+            set_font("", 11)
+            pdf.cell(0, 8, value, ln=True)
 
-        # Green line separator
-        pdf.ln(10)
+        # Bottom accent line
+        pdf.ln(15)
         pdf.set_draw_color(0, 255, 136)
-        pdf.set_line_width(0.8)
-        pdf.line(30, pdf.get_y(), 180, pdf.get_y())
+        pdf.set_line_width(1.0)
+        pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+
+        # Footer on title page
+        pdf.set_y(-30)
+        set_font("", 9)
+        pdf.set_text_color(120, 120, 120)
+        pdf.cell(0, 6, "Generated by AU Grants Agent | NullShift", align="C", ln=True)
+        pdf.set_text_color(0, 0, 0)
 
         # ── Content Pages ──
         pdf.add_page()
         content = self._full_content(proposal)
+        lines = content.split("\n")
+        toc_entries: list[tuple[str, int, int]] = []  # (title, level, page)
+        i = 0
 
-        # Track if we're in Vietnamese section for logging
-        in_vi_section = False
-
-        for line in content.split("\n"):
-            line = line.rstrip()
+        while i < len(lines):
+            line = lines[i].rstrip()
 
             # Check page space
-            if pdf.get_y() > 270:
+            if pdf.get_y() > 265:
                 pdf.add_page()
 
-            # Headings
+            # ── Tables (consume block) ──
+            if line.strip().startswith("|"):
+                table_rows, i = self._parse_table_rows(lines, i)
+                if table_rows:
+                    self._render_pdf_table(pdf, table_rows, set_font, safe_write)
+                continue
+
+            # ── Headings ──
             if line.startswith("### "):
-                pdf.ln(3)
-                set_font("B", 12)
-                safe_write(line[4:])
-                pdf.ln(1)
-            elif line.startswith("## "):
+                heading = line[4:]
                 pdf.ln(4)
-                set_font("B", 14)
-                # Detect Vietnamese section
-                if "Tiếng Việt" in line or "Tóm tắt" in line:
-                    in_vi_section = True
-                safe_write(line[3:])
+                # Thin accent line before h3
+                pdf.set_draw_color(0, 200, 100)
+                pdf.set_line_width(0.3)
+                pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + 30, pdf.get_y())
                 pdf.ln(2)
-            elif line.startswith("# "):
-                pdf.ln(5)
-                set_font("B", 16)
-                safe_write(line[2:])
+                set_font("B", 12)
+                safe_write(heading)
+                pdf.ln(2)
+                toc_entries.append((heading, 3, pdf.page))
+            elif line.startswith("## "):
+                heading = line[3:]
+                pdf.ln(6)
+                set_font("B", 14)
+                pdf.set_text_color(0, 150, 80)
+                safe_write(heading)
+                pdf.set_text_color(0, 0, 0)
                 pdf.ln(3)
+                toc_entries.append((heading, 2, pdf.page))
+            elif line.startswith("# "):
+                heading = line[2:]
+                pdf.ln(8)
+                # Green accent bar before h1
+                pdf.set_fill_color(0, 255, 136)
+                pdf.rect(pdf.l_margin, pdf.get_y(), 3, 12, "F")
+                pdf.set_x(pdf.l_margin + 6)
+                set_font("B", 16)
+                pdf.multi_cell(0, 8, heading)
+                pdf.ln(4)
+                toc_entries.append((heading, 1, pdf.page))
+
+            # ── Bold standalone line ──
             elif line.startswith("**") and line.endswith("**"):
-                # Full bold line
                 pdf.ln(2)
                 set_font("B", 11)
                 safe_write(line.strip("*"))
                 set_font("", 11)
+
+            # ── Horizontal rule ──
             elif line.startswith("---"):
-                # Horizontal rule
-                pdf.ln(5)
+                pdf.ln(6)
                 pdf.set_draw_color(0, 255, 136)
-                pdf.set_line_width(0.5)
-                pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-                pdf.ln(5)
-            elif line.startswith("|"):
-                # Table row — render as compact text
-                set_font("", 8)
-                clean = line.replace("|", " | ").strip().strip("|").strip()
-                # Skip separator rows (----, ====, ::::)
-                if clean and not all(c in "-= :| " for c in clean):
-                    safe_write(clean)
-            elif line.strip() == "":
-                pdf.ln(3)
+                pdf.set_line_width(0.6)
+                pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+                pdf.ln(6)
+
+            # ── Numbered list (e.g., "1. ", "2. ") ──
+            elif re.match(r"^\d+\.\s+", line):
+                set_font("", 11)
+                clean = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
+                safe_write(f"  {clean}")
+
+            # ── Bullet point ──
             elif line.startswith("*   ") or line.startswith("- ") or line.startswith("* "):
-                # Bullet point
                 set_font("", 11)
                 bullet_text = line.lstrip("*- ").strip()
                 bullet_text = re.sub(r"\*\*(.*?)\*\*", r"\1", bullet_text)
-                safe_write(f"  \u2022 {bullet_text}")
+                safe_write(f"    \u2022  {bullet_text}")
+
+            # ── Sub-bullet / indented ──
             elif line.startswith("    "):
-                # Indented / sub-bullet
                 set_font("", 10)
                 clean = re.sub(r"\*\*(.*?)\*\*", r"\1", line.strip().lstrip("*- "))
-                safe_write(f"      - {clean}")
+                safe_write(f"        \u2013  {clean}")
+
+            # ── Empty line ──
+            elif line.strip() == "":
+                pdf.ln(3)
+
+            # ── Regular paragraph ──
             else:
-                # Regular paragraph
                 set_font("", 11)
                 clean = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
                 safe_write(clean)
 
-        # ── Page Numbers ──
+            i += 1
+
+        # ── Page Headers & Footers ──
         total_pages = pdf.pages_count
-        for i in range(1, total_pages + 1):
-            pdf.page = i
+        short_title = grant.title[:60] + ("..." if len(grant.title) > 60 else "")
+        for pg in range(1, total_pages + 1):
+            pdf.page = pg
+
+            # Header (skip title page)
+            if pg > 1:
+                pdf.set_y(5)
+                set_font("", 7)
+                pdf.set_text_color(140, 140, 140)
+                pdf.cell(0, 5, short_title, align="L")
+                pdf.cell(0, 5, grant.agency or "Australian Government", align="R", ln=True)
+                pdf.set_draw_color(200, 200, 200)
+                pdf.set_line_width(0.2)
+                pdf.line(pdf.l_margin, 11, pdf.w - pdf.r_margin, 11)
+                pdf.set_text_color(0, 0, 0)
+
+            # Footer
             pdf.set_y(-15)
-            if uni_font:
-                pdf.set_font(uni_font, "", 8)
-            else:
-                pdf.set_font("Helvetica", "I", 8)
-            pdf.cell(0, 10, f"Page {i} of {total_pages}", align="C")
+            set_font("", 8)
+            pdf.set_text_color(140, 140, 140)
+            pdf.cell(0, 10, f"Page {pg} of {total_pages}", align="C")
+            pdf.set_text_color(0, 0, 0)
 
         pdf.output(str(filepath))
         logger.info("Exported PDF: %s", filepath)

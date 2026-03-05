@@ -20,11 +20,23 @@ def extract_amount_range(text: Optional[str]) -> tuple[Optional[float], Optional
     """Extract min and max dollar amounts from text like '$10,000 - $500,000'."""
     if not text:
         return None, None
-    amounts = re.findall(r"\$[\d,]+(?:\.\d{2})?", text)
+    # Match "$3 million", "$500,000", "$10.5 million", "$2,000"
+    amounts = re.findall(
+        r"\$([\d,]+(?:\.\d+)?)\s*(million|m|billion|b|thousand|k)?",
+        text, re.IGNORECASE,
+    )
     parsed = []
-    for a in amounts:
+    for num_str, suffix in amounts:
         try:
-            parsed.append(float(a.replace("$", "").replace(",", "")))
+            num = float(num_str.replace(",", ""))
+            suffix_lower = suffix.lower() if suffix else ""
+            if suffix_lower in ("million", "m"):
+                num *= 1_000_000
+            elif suffix_lower in ("billion", "b"):
+                num *= 1_000_000_000
+            elif suffix_lower in ("thousand", "k"):
+                num *= 1_000
+            parsed.append(num)
         except ValueError:
             continue
     if len(parsed) >= 2:

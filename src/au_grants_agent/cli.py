@@ -340,24 +340,131 @@ def export_grants(ctx: Context, fmt: str, output_path: Optional[str]) -> None:
     console.print(f"[#00ff88]Exported {len(grants)} grants to {out_path}[/#00ff88]")
 
 
+# ── profile ────────────────────────────────────────────────────
+
+@cli.group()
+def profile() -> None:
+    """Manage organisation profiles for tailored proposals."""
+    pass
+
+
+@profile.command("create")
+@click.option("--name", prompt="Organisation name", help="Organisation name")
+@click.option("--type", "org_type", default=None, help="Type (University, Research Institute, SME)")
+@click.option("--state", default=None, help="State (NSW, VIC, QLD, etc.)")
+@click.option("--description", "desc", default=None, help="Short description")
+def profile_create(name: str, org_type: Optional[str], state: Optional[str], desc: Optional[str]) -> None:
+    """Create a new organisation profile."""
+    from au_grants_agent.proposal.profiles import OrgProfile, save_profile
+
+    profile_obj = OrgProfile(
+        name=name,
+        type=org_type,
+        state=state,
+        description=desc,
+    )
+    path = save_profile(profile_obj)
+    console.print(f"[#00ff88]Profile created: {path}[/#00ff88]")
+    console.print("[dim]Edit the YAML file to add research strengths, personnel, past grants, etc.[/dim]")
+
+
+@profile.command("example")
+def profile_example() -> None:
+    """Create an example profile YAML for reference."""
+    from au_grants_agent.proposal.profiles import create_example_profile
+
+    path = create_example_profile()
+    console.print(f"[#00ff88]Example profile created: {path}[/#00ff88]")
+    console.print("[dim]Copy and edit this file to create your own profile.[/dim]")
+
+
+@profile.command("list")
+def profile_list() -> None:
+    """List available organisation profiles."""
+    from au_grants_agent.proposal.profiles import list_profiles
+
+    profiles = list_profiles()
+    if not profiles:
+        console.print("[yellow]No profiles found. Run 'au-grants profile example' to get started.[/yellow]")
+        return
+
+    table = Table(title="Organisation Profiles", border_style="#00ff88")
+    table.add_column("File", style="dim")
+    table.add_column("Organisation")
+    for filename, org_name in profiles:
+        table.add_row(filename, org_name)
+    console.print(table)
+
+
+@profile.command("show")
+@click.argument("name")
+def profile_show(name: str) -> None:
+    """Show details of an organisation profile."""
+    from au_grants_agent.proposal.profiles import load_profile
+
+    try:
+        p = load_profile(name)
+    except FileNotFoundError:
+        console.print(f"[red]Profile '{name}' not found.[/red]")
+        return
+
+    content = f"[bold]Name:[/bold] {p.name}\n"
+    if p.type:
+        content += f"[bold]Type:[/bold] {p.type}\n"
+    if p.state:
+        content += f"[bold]State:[/bold] {p.state}\n"
+    if p.description:
+        content += f"[bold]Description:[/bold] {p.description}\n"
+    if p.research_strengths:
+        content += f"\n[bold]Research Strengths:[/bold]\n"
+        for s in p.research_strengths:
+            content += f"  - {s}\n"
+    if p.key_personnel:
+        content += f"\n[bold]Key Personnel:[/bold]\n"
+        for person in p.key_personnel:
+            content += f"  - {person.name} ({person.role})"
+            if person.expertise:
+                content += f" — {person.expertise}"
+            content += "\n"
+    if p.past_grants:
+        content += f"\n[bold]Past Grants:[/bold]\n"
+        for g in p.past_grants:
+            content += f"  - {g}\n"
+    if p.facilities:
+        content += f"\n[bold]Facilities:[/bold]\n"
+        for f in p.facilities:
+            content += f"  - {f}\n"
+
+    console.print(Panel(content, title=f"[#00ff88]Profile: {p.name}[/#00ff88]", border_style="#00ff88"))
+
+
 # ── propose ─────────────────────────────────────────────────────
 
 @cli.command()
 @click.argument("grant_id")
 @click.option("--org", default=None, help="Applicant organisation name")
+@click.option("--profile", "profile_name", default=None, help="Organisation profile name or YAML file path")
 @click.option("--focus", default=None, help="Research focus area")
 @click.option("--output", "output_dir", default=None, help="Output directory")
 @click.option("--format", "fmt", default="all", type=click.Choice(["all", "md", "docx", "pdf"]))
+@click.option("--no-refine", is_flag=True, help="Skip multi-pass review/refine (faster, cheaper)")
 @pass_ctx
 def propose(
     ctx: Context,
     grant_id: str,
     org: Optional[str],
+    profile_name: Optional[str],
     focus: Optional[str],
     output_dir: Optional[str],
     fmt: str,
+    no_refine: bool,
 ) -> None:
-    """Generate a proposal for a specific grant."""
+    """Generate a proposal for a specific grant.
+
+    By default uses 3-pass generation (draft → expert review → refined version).
+    Use --no-refine to skip the review/refine passes for faster, cheaper output.
+    Use --profile to load an organisation profile for tailored proposals.
+    """
     from au_grants_agent.database import Database
     from au_grants_agent.proposal.exporter import ProposalExporter
     from au_grants_agent.proposal.generator import ProposalGenerator
@@ -366,6 +473,18 @@ def propose(
         key_name = "DEEPSEEK_API_KEY" if settings.llm_provider == "deepseek" else "ANTHROPIC_API_KEY"
         console.print(f"[red]{key_name} not set. Add it to .env file.[/red]")
         return
+
+    # Load org profile if specified
+    org_profile = None
+    if profile_name:
+        from au_grants_agent.proposal.profiles import load_profile
+
+        try:
+            org_profile = load_profile(profile_name)
+            console.print(f"[#00ff88]Loaded profile: {org_profile.name}[/#00ff88]")
+        except FileNotFoundError:
+            console.print(f"[red]Profile '{profile_name}' not found. Run 'au-grants profile list'.[/red]")
+            return
 
     db = Database()
     grant = db.get_grant(grant_id)
@@ -383,7 +502,29 @@ def propose(
         return
 
     generator = ProposalGenerator(db=db)
-    proposal = generator.generate(grant=grant, org_name=org, focus_area=focus)
+    proposal = generator.generate(
+        grant=grant,
+        org_name=org,
+        focus_area=focus,
+        refine=not no_refine,
+        org_profile=org_profile,
+    )
+
+    # Validate
+    from au_grants_agent.proposal.validator import validate_proposal
+
+    if proposal.content_en:
+        vresult = validate_proposal(proposal.content_en)
+        ref_color = "green" if vresult.reference_score >= 60 else "yellow" if vresult.reference_score >= 40 else "red"
+        comp_color = "green" if vresult.completeness_score >= 80 else "yellow"
+        console.print(Panel(
+            f"[bold]Words:[/bold] {vresult.word_count:,}\n"
+            f"[bold]Completeness:[/bold] [{comp_color}]{vresult.completeness_score:.0f}%[/{comp_color}]\n"
+            f"[bold]References:[/bold] [{ref_color}]{vresult.valid_references}/{vresult.total_references} valid ({vresult.reference_score:.0f}%)[/{ref_color}]"
+            + (f"\n[bold yellow]Issues:[/bold yellow] {', '.join(vresult.issues)}" if vresult.issues else ""),
+            title="[#00ff88]Validation[/#00ff88]",
+            border_style="dim",
+        ))
 
     # Export
     out_dir = Path(output_dir) if output_dir else None
@@ -397,14 +538,41 @@ def propose(
     ))
 
 
+# ── validate ───────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("file_path", type=click.Path(exists=True))
+@pass_ctx
+def validate(ctx: Context, file_path: str) -> None:
+    """Validate a generated proposal file (MD format)."""
+    from au_grants_agent.proposal.validator import (
+        format_validation_report,
+        validate_proposal,
+    )
+
+    content = Path(file_path).read_text(encoding="utf-8")
+
+    # Strip YAML frontmatter if present
+    if content.startswith("---"):
+        end = content.find("---", 3)
+        if end > 0:
+            content = content[end + 3:].strip()
+
+    result = validate_proposal(content)
+    report = format_validation_report(result)
+    console.print(Markdown(report))
+
+
 # ── pipeline ────────────────────────────────────────────────────
 
 @cli.command()
 @click.option("--top", "top_n", default=3, help="Number of top grants to process")
 @click.option("--format", "fmt", default="all", type=click.Choice(["all", "md", "docx", "pdf"]))
 @click.option("--org", default=None, help="Applicant organisation")
+@click.option("--profile", "profile_name", default=None, help="Organisation profile name or YAML file path")
+@click.option("--no-refine", is_flag=True, help="Skip multi-pass review/refine")
 @pass_ctx
-def pipeline(ctx: Context, top_n: int, fmt: str, org: Optional[str]) -> None:
+def pipeline(ctx: Context, top_n: int, fmt: str, org: Optional[str], profile_name: Optional[str], no_refine: bool) -> None:
     """Full pipeline: crawl -> rank by deadline -> generate proposals."""
     from au_grants_agent.crawler import BusinessGovCrawler, GrantsGovCrawler
     from au_grants_agent.database import Database
@@ -415,6 +583,18 @@ def pipeline(ctx: Context, top_n: int, fmt: str, org: Optional[str]) -> None:
         key_name = "DEEPSEEK_API_KEY" if settings.llm_provider == "deepseek" else "ANTHROPIC_API_KEY"
         console.print(f"[red]{key_name} not set. Add it to .env file.[/red]")
         return
+
+    # Load org profile if specified
+    org_profile = None
+    if profile_name:
+        from au_grants_agent.proposal.profiles import load_profile
+
+        try:
+            org_profile = load_profile(profile_name)
+            console.print(f"[#00ff88]Loaded profile: {org_profile.name}[/#00ff88]")
+        except FileNotFoundError:
+            console.print(f"[red]Profile '{profile_name}' not found.[/red]")
+            return
 
     db = Database()
     db.init_db()
@@ -452,7 +632,9 @@ def pipeline(ctx: Context, top_n: int, fmt: str, org: Optional[str]) -> None:
 
     for g in selected:
         console.rule(f"[#00ff88]{g.title[:60]}[/#00ff88]")
-        proposal = generator.generate(grant=g, org_name=org)
+        proposal = generator.generate(
+            grant=g, org_name=org, refine=not no_refine, org_profile=org_profile,
+        )
         paths = exporter.export_all(g, proposal, formats=fmt)
         for p in paths:
             console.print(f"  [dim]{p}[/dim]")
