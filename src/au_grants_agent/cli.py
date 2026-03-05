@@ -96,7 +96,7 @@ def config(ctx: Context) -> None:
 # ── crawl ───────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("--source", type=click.Choice(["grants.gov.au", "business.gov.au"]), help="Crawl a specific source")
+@click.option("--source", type=click.Choice(["grants.gov.au", "business.gov.au", "arc.gov.au", "nhmrc.gov.au"]), help="Crawl a specific source")
 @click.option("--category", default=None, help="Filter by category")
 @click.option("--dry-run", is_flag=True, help="Fetch & parse without saving")
 @pass_ctx
@@ -104,7 +104,7 @@ def crawl(ctx: Context, source: Optional[str], category: Optional[str], dry_run:
     """Crawl Australian Government grant websites."""
     from rich.progress import Progress, SpinnerColumn, TextColumn
 
-    from au_grants_agent.crawler import BusinessGovCrawler, GrantsGovCrawler
+    from au_grants_agent.crawler import ARCCrawler, BusinessGovCrawler, GrantsGovCrawler, NHMRCCrawler
     from au_grants_agent.database import Database
 
     db = Database()
@@ -115,6 +115,10 @@ def crawl(ctx: Context, source: Optional[str], category: Optional[str], dry_run:
         crawlers.append(GrantsGovCrawler(db=db))
     if source == "business.gov.au" or source is None:
         crawlers.append(BusinessGovCrawler(db=db))
+    if source == "arc.gov.au" or source is None:
+        crawlers.append(ARCCrawler(db=db))
+    if source == "nhmrc.gov.au" or source is None:
+        crawlers.append(NHMRCCrawler(db=db))
 
     async def run_crawl():
         results = []
@@ -438,6 +442,83 @@ def profile_show(name: str) -> None:
     console.print(Panel(content, title=f"[#00ff88]Profile: {p.name}[/#00ff88]", border_style="#00ff88"))
 
 
+# ── match ──────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("profile_name")
+@click.option("--top", "top_n", default=10, help="Number of top matches to show")
+@click.option("--min-score", default=0.1, help="Minimum match score (0.0-1.0)")
+@click.option("--status", default=None, help="Filter by grant status (Open, Closed)")
+@pass_ctx
+def match(
+    ctx: Context,
+    profile_name: str,
+    top_n: int,
+    min_score: float,
+    status: Optional[str],
+) -> None:
+    """Match grants to an organisation profile by relevance."""
+    from au_grants_agent.database import Database
+    from au_grants_agent.proposal.matcher import rank_grants
+    from au_grants_agent.proposal.profiles import load_profile
+
+    try:
+        profile = load_profile(profile_name)
+    except FileNotFoundError:
+        console.print(f"[red]Profile '{profile_name}' not found. Run 'au-grants profile list'.[/red]")
+        return
+
+    db = Database()
+    grants = db.list_grants(status=status)
+
+    if not grants:
+        console.print("[yellow]No grants found. Run 'au-grants crawl' first.[/yellow]")
+        return
+
+    results = rank_grants(grants, profile, min_score=min_score, top_n=top_n)
+
+    if not results:
+        console.print(f"[yellow]No grants match with score >= {min_score}[/yellow]")
+        return
+
+    console.print(Panel(
+        f"[bold]Profile:[/bold] {profile.name}\n"
+        f"[bold]Grants Analyzed:[/bold] {len(grants)}\n"
+        f"[bold]Matches (score >= {min_score}):[/bold] {len(results)}",
+        title="[#00ff88]Grant Matching[/#00ff88]",
+        border_style="#00ff88",
+    ))
+
+    table = Table(title=f"Top {len(results)} Matches", border_style="#00ff88", show_lines=True)
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Score", justify="center", width=8)
+    table.add_column("Rating", width=10)
+    table.add_column("ID", style="dim", width=10)
+    table.add_column("Title", max_width=40)
+    table.add_column("Agency", max_width=25)
+    table.add_column("Reasons", max_width=40)
+
+    for i, m in enumerate(results, 1):
+        # Color by rating
+        rating_colors = {"Excellent": "green", "Good": "cyan", "Fair": "yellow", "Low": "dim"}
+        color = rating_colors.get(m.rating, "white")
+
+        score_bar = "█" * int(m.score * 10) + "░" * (10 - int(m.score * 10))
+        reasons = "; ".join(m.reasons[:3]) if m.reasons else "-"
+
+        table.add_row(
+            str(i),
+            f"[{color}]{m.score:.0%}[/{color}]",
+            f"[{color}]{m.rating}[/{color}]",
+            (m.grant.go_id or m.grant.id[:8]),
+            m.grant.title[:40],
+            (m.grant.agency or "")[:25],
+            reasons[:40],
+        )
+
+    console.print(table)
+
+
 # ── propose ─────────────────────────────────────────────────────
 
 @cli.command()
@@ -574,7 +655,7 @@ def validate(ctx: Context, file_path: str) -> None:
 @pass_ctx
 def pipeline(ctx: Context, top_n: int, fmt: str, org: Optional[str], profile_name: Optional[str], no_refine: bool) -> None:
     """Full pipeline: crawl -> rank by deadline -> generate proposals."""
-    from au_grants_agent.crawler import BusinessGovCrawler, GrantsGovCrawler
+    from au_grants_agent.crawler import ARCCrawler, BusinessGovCrawler, GrantsGovCrawler, NHMRCCrawler
     from au_grants_agent.database import Database
     from au_grants_agent.proposal.exporter import ProposalExporter
     from au_grants_agent.proposal.generator import ProposalGenerator
@@ -603,7 +684,7 @@ def pipeline(ctx: Context, top_n: int, fmt: str, org: Optional[str], profile_nam
     console.print("[bold #00ff88]Step 1: Crawling grant sources...[/bold #00ff88]")
 
     async def do_crawl():
-        for CrawlerClass in [GrantsGovCrawler, BusinessGovCrawler]:
+        for CrawlerClass in [GrantsGovCrawler, BusinessGovCrawler, ARCCrawler, NHMRCCrawler]:
             crawler = CrawlerClass(db=db)
             result = await crawler.crawl()
             console.print(
