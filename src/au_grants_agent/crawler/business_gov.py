@@ -36,16 +36,10 @@ KNOWN_GRANT_URLS = [
     "/grants-and-programs/australian-heritage-grants-2025-2026",
     "/grants-and-programs/mrff-2026-national-critical-research-infrastructure",
     "/grants-and-programs/entrepreneurs-programme",
-    "/grants-and-programs/incubator-support-initiative",
     "/grants-and-programs/boosting-female-founders-initiative",
     "/grants-and-programs/accelerating-commercialisation",
     "/grants-and-programs/innovation-connections",
     "/grants-and-programs/supply-chain-resilience-initiative",
-    "/grants-and-programs/modern-manufacturing-initiative",
-    "/grants-and-programs/regional-recovery-partnerships-program",
-    "/grants-and-programs/building-better-regions-fund",
-    "/grants-and-programs/community-development-grants-programme",
-    "/grants-and-programs/volunteer-grants",
 ]
 
 
