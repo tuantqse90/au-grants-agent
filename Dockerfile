@@ -15,10 +15,6 @@ RUN pip install --no-cache-dir -e ".[all]" 2>/dev/null || pip install --no-cache
 # Create data dirs
 RUN mkdir -p data profiles proposals templates
 
-# Copy profiles and templates if they exist
-COPY profiles/ profiles/ 2>/dev/null || true
-COPY templates/ templates/ 2>/dev/null || true
-
 # Init DB on build
 RUN au-grants init || true
 
