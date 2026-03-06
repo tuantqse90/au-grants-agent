@@ -13,8 +13,10 @@ load_dotenv()
 class Settings:
     """Central configuration sourced from .env / environment."""
 
+    VALID_PROVIDERS = {"deepseek", "anthropic", "gemini", "openai"}
+
     def __init__(self) -> None:
-        # LLM provider: "deepseek" or "anthropic"
+        # LLM provider: "deepseek", "anthropic", "gemini", or "openai"
         self.llm_provider: str = os.getenv("LLM_PROVIDER", "deepseek").lower()
 
         # DeepSeek config
@@ -25,6 +27,21 @@ class Settings:
         # Anthropic config
         self.anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
         self.anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+
+        # Gemini config
+        self.gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+        self.gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+        # OpenAI config
+        self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+        self.openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+
+        # SMTP / Notifications
+        self.smtp_host: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
+        self.smtp_port: int = int(os.getenv("SMTP_PORT", "587"))
+        self.smtp_user: str = os.getenv("SMTP_USER", "")
+        self.smtp_password: str = os.getenv("SMTP_PASSWORD", "")
+        self.notify_to: str = os.getenv("NOTIFY_TO", "")
 
         # General
         self.db_path: Path = Path(os.getenv("DB_PATH", "data/grants.db"))
@@ -38,21 +55,45 @@ class Settings:
 
     @property
     def default_model(self) -> str:
-        if self.llm_provider == "deepseek":
-            return self.deepseek_model
-        return self.anthropic_model
+        return {
+            "deepseek": self.deepseek_model,
+            "anthropic": self.anthropic_model,
+            "gemini": self.gemini_model,
+            "openai": self.openai_model,
+        }.get(self.llm_provider, self.deepseek_model)
 
     @property
     def has_api_key(self) -> bool:
-        if self.llm_provider == "deepseek":
-            return bool(self.deepseek_api_key) and self.deepseek_api_key != "sk-..."
-        return bool(self.anthropic_api_key) and self.anthropic_api_key != "sk-ant-..."
+        key_map = {
+            "deepseek": (self.deepseek_api_key, "sk-..."),
+            "anthropic": (self.anthropic_api_key, "sk-ant-..."),
+            "gemini": (self.gemini_api_key, ""),
+            "openai": (self.openai_api_key, "sk-..."),
+        }
+        key, placeholder = key_map.get(self.llm_provider, ("", ""))
+        return bool(key) and key != placeholder
+
+    def get_api_key(self, provider: str) -> str:
+        """Get API key for a specific provider."""
+        return {
+            "deepseek": self.deepseek_api_key,
+            "anthropic": self.anthropic_api_key,
+            "gemini": self.gemini_api_key,
+            "openai": self.openai_api_key,
+        }.get(provider, "")
+
+    def get_model(self, provider: str) -> str:
+        """Get model name for a specific provider."""
+        return {
+            "deepseek": self.deepseek_model,
+            "anthropic": self.anthropic_model,
+            "gemini": self.gemini_model,
+            "openai": self.openai_model,
+        }.get(provider, "")
 
     @property
     def provider_display(self) -> str:
-        if self.llm_provider == "deepseek":
-            return f"DeepSeek ({self.deepseek_model})"
-        return f"Anthropic ({self.anthropic_model})"
+        return f"{self.llm_provider.title()} ({self.default_model})"
 
     def ensure_dirs(self) -> None:
         """Create required directories if they don't exist."""

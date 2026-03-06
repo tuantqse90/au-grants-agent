@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  # CLI mode — run any au-grants command
+  cli:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./profiles:/app/profiles
+      - ./proposals:/app/proposals
+    entrypoint: ["au-grants"]
+    # Override CMD to run specific commands, e.g.:
+    #   docker compose run cli crawl
+    #   docker compose run cli stats
+    #   docker compose run cli propose GRANT_ID
+
+  # Web UI mode — Streamlit dashboard
+  web:
+    build: .
+    env_file: .env
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./profiles:/app/profiles
+      - ./proposals:/app/proposals
+    entrypoint: ["python", "-m", "streamlit", "run", "src/au_grants_agent/web.py"]
+    command: ["--server.port", "8501", "--server.headless", "true", "--server.address", "0.0.0.0"]
+
+  # Scheduler — daily auto-crawl
+  scheduler:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./profiles:/app/profiles
+    entrypoint: ["au-grants"]
+    command: ["schedule", "--hour", "6", "--minute", "0"]
+    restart: unless-stopped

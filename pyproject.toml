@@ -26,6 +26,10 @@ dependencies = [
     "fpdf2>=2.7",
     "markdownify>=0.13",
     "pyyaml>=6.0",
+    "apscheduler>=3.10",
+    "streamlit>=1.30",
+    "pandas>=2.0",
+    "google-genai>=1.0",
 ]
 
 [project.scripts]
@@ -33,3 +37,7 @@ au-grants = "au_grants_agent.cli:cli"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

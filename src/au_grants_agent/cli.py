@@ -723,6 +723,191 @@ def pipeline(ctx: Context, top_n: int, fmt: str, org: Optional[str], profile_nam
     console.print("\n[bold #00ff88]Pipeline complete![/bold #00ff88]")
 
 
+# ── schedule ───────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--hour", default=6, help="Hour to run daily crawl (0-23)")
+@click.option("--minute", default=0, help="Minute to run")
+@click.option("--notify", "notify_profile", default=None, help="Profile name for email notifications")
+@pass_ctx
+def schedule(ctx: Context, hour: int, minute: int, notify_profile: Optional[str]) -> None:
+    """Start scheduled daily crawl (runs until Ctrl+C)."""
+    from au_grants_agent.scheduler import start_scheduler
+
+    start_scheduler(cron_hour=hour, cron_minute=minute, notify_profile=notify_profile)
+
+
+# ── notify ─────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--profile", "profile_name", default=None, help="Organisation profile name")
+@click.option("--min-score", default=0.3, help="Minimum match score")
+@click.option("--top", "top_n", default=20, help="Max grants in digest")
+@pass_ctx
+def notify(ctx: Context, profile_name: Optional[str], min_score: float, top_n: int) -> None:
+    """Send email digest of matching grants."""
+    from au_grants_agent.notify import send_digest
+
+    success = send_digest(profile_name=profile_name, min_score=min_score, top_n=top_n)
+    if success:
+        console.print("[#00ff88]Email digest sent successfully![/#00ff88]")
+    else:
+        console.print("[yellow]Could not send digest. Check SMTP settings in .env[/yellow]")
+
+
+# ── compare ────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("grant_id")
+@click.option("--providers", default="deepseek,anthropic", help="Comma-separated providers to compare")
+@click.option("--org", default=None, help="Organisation name")
+@pass_ctx
+def compare(ctx: Context, grant_id: str, providers: str, org: Optional[str]) -> None:
+    """Compare proposal quality across LLM providers."""
+    from au_grants_agent.database import Database
+    from au_grants_agent.proposal.generator import ProposalGenerator
+    from au_grants_agent.proposal.validator import validate_proposal
+
+    db = Database()
+    grant = db.get_grant(grant_id)
+    if not grant:
+        grants = db.list_grants()
+        for g in grants:
+            if g.id.startswith(grant_id):
+                grant = g
+                break
+    if not grant:
+        console.print(f"[red]Grant '{grant_id}' not found.[/red]")
+        return
+
+    provider_list = [p.strip() for p in providers.split(",")]
+    results_data = []
+
+    import time
+    for provider in provider_list:
+        api_key = settings.get_api_key(provider)
+        if not api_key:
+            console.print(f"[yellow]Skipping {provider} — no API key configured[/yellow]")
+            continue
+
+        console.rule(f"[#00ff88]{provider.title()}[/#00ff88]")
+        start = time.time()
+
+        try:
+            gen = ProposalGenerator(db=db, provider=provider)
+            proposal = gen.generate(grant=grant, org_name=org, refine=False)
+            duration = round(time.time() - start, 1)
+
+            # Validate
+            vresult = validate_proposal(proposal.content_en or "")
+
+            results_data.append({
+                "provider": provider,
+                "model": gen.model,
+                "tokens": proposal.tokens_used or 0,
+                "words": vresult.word_count,
+                "completeness": vresult.completeness_score,
+                "references": vresult.total_references,
+                "ref_valid": vresult.valid_references,
+                "ref_score": vresult.reference_score,
+                "duration": duration,
+            })
+        except Exception as e:
+            console.print(f"[red]{provider} failed: {e}[/red]")
+
+    if results_data:
+        table = Table(title="Provider Comparison", border_style="#00ff88", show_lines=True)
+        table.add_column("Provider", style="bold")
+        table.add_column("Model")
+        table.add_column("Tokens", justify="right")
+        table.add_column("Words", justify="right")
+        table.add_column("Completeness", justify="center")
+        table.add_column("References", justify="center")
+        table.add_column("Ref Quality", justify="center")
+        table.add_column("Duration", justify="right")
+
+        for r in results_data:
+            comp_color = "green" if r["completeness"] >= 80 else "yellow"
+            ref_color = "green" if r["ref_score"] >= 60 else "yellow"
+            table.add_row(
+                r["provider"],
+                r["model"],
+                f"{r['tokens']:,}",
+                f"{r['words']:,}",
+                f"[{comp_color}]{r['completeness']:.0f}%[/{comp_color}]",
+                f"{r['ref_valid']}/{r['references']}",
+                f"[{ref_color}]{r['ref_score']:.0f}%[/{ref_color}]",
+                f"{r['duration']}s",
+            )
+
+        console.print(table)
+
+
+# ── report ─────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("profile_name")
+@click.option("--top", "top_n", default=20, help="Number of top matches")
+@click.option("--min-score", default=0.1, help="Minimum match score")
+@click.option("--output", "output_dir", default=None, help="Output directory")
+@pass_ctx
+def report(ctx: Context, profile_name: str, top_n: int, min_score: float, output_dir: Optional[str]) -> None:
+    """Generate a PDF matching report for an org profile."""
+    from au_grants_agent.database import Database
+    from au_grants_agent.proposal.matcher import rank_grants
+    from au_grants_agent.proposal.profiles import load_profile
+    from au_grants_agent.proposal.report import generate_matching_report
+
+    try:
+        profile = load_profile(profile_name)
+    except FileNotFoundError:
+        console.print(f"[red]Profile '{profile_name}' not found.[/red]")
+        return
+
+    db = Database()
+    grants = db.list_grants(status="open")
+    if not grants:
+        console.print("[yellow]No open grants found.[/yellow]")
+        return
+
+    matches = rank_grants(grants, profile, min_score=min_score, top_n=top_n)
+    if not matches:
+        console.print("[yellow]No grants match above threshold.[/yellow]")
+        return
+
+    from pathlib import Path
+    out_dir = Path(output_dir) if output_dir else None
+
+    path = generate_matching_report(
+        profile_name=profile.name,
+        profile_type=profile.type or "",
+        profile_state=profile.state or "",
+        research_strengths=profile.research_strengths,
+        matches=matches,
+        output_dir=out_dir,
+    )
+    console.print(f"[#00ff88]Report saved: {path}[/#00ff88]")
+
+
+# ── web ────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--port", default=8501, help="Port for Streamlit server")
+@pass_ctx
+def web(ctx: Context, port: int) -> None:
+    """Launch the Streamlit web UI."""
+    import subprocess
+    import sys
+
+    web_path = Path(__file__).parent / "web.py"
+    console.print(f"[#00ff88]Starting web UI on port {port}...[/#00ff88]")
+    subprocess.run([
+        sys.executable, "-m", "streamlit", "run", str(web_path),
+        "--server.port", str(port),
+        "--server.headless", "true",
+    ])
+
+
 def main() -> None:
     cli()
 

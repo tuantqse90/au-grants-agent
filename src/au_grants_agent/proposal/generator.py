@@ -32,26 +32,37 @@ console = Console()
 
 
 class ProposalGenerator:
-    """Generate grant proposals using DeepSeek or Claude API with streaming output."""
+    """Generate grant proposals using DeepSeek, Claude, Gemini, or GPT-4o with streaming output."""
 
-    def __init__(self, db: Optional[Database] = None) -> None:
+    def __init__(self, db: Optional[Database] = None, provider: Optional[str] = None) -> None:
         self.db = db or Database()
-        self.provider = settings.llm_provider
-        self.model = settings.default_model
+        self.provider = provider or settings.llm_provider
+        self.model = settings.get_model(self.provider)
+        self.openai_client = None
+        self._anthropic_client = None
+        self._gemini_model = None
 
+        self._init_client()
+
+    def _init_client(self) -> None:
+        """Initialize the LLM client for the selected provider."""
         if self.provider == "deepseek":
             from openai import OpenAI
-
             self.openai_client = OpenAI(
                 api_key=settings.deepseek_api_key,
                 base_url=settings.deepseek_base_url,
             )
-            self._anthropic_client = None
-        else:
+        elif self.provider == "anthropic":
             import anthropic
-
             self._anthropic_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-            self.openai_client = None
+        elif self.provider == "gemini":
+            from google import genai
+            self._gemini_client = genai.Client(api_key=settings.gemini_api_key)
+        elif self.provider == "openai":
+            from openai import OpenAI
+            self.openai_client = OpenAI(api_key=settings.openai_api_key)
+        else:
+            raise ValueError(f"Unknown provider: {self.provider}")
 
     def _stream_deepseek(
         self, system: str, user_prompt: str, max_tokens: int, label: str
@@ -116,13 +127,85 @@ class ProposalGenerator:
         console.print()
         return full_text, total_tokens
 
+    def _stream_gemini(
+        self, system: str, user_prompt: str, max_tokens: int, label: str
+    ) -> tuple[str, int]:
+        """Stream a Gemini response to terminal. Returns (text, token_count)."""
+        from google.genai import types
+
+        full_text = ""
+        console.print(f"\n[bold #00ff88]>>> {label} [Gemini][/bold #00ff88]\n")
+
+        response = self._gemini_client.models.generate_content(
+            model=self.model,
+            contents=f"{system}\n\n{user_prompt}",
+            config=types.GenerateContentConfig(
+                max_output_tokens=max_tokens,
+                temperature=0.7,
+            ),
+        )
+
+        full_text = response.text or ""
+        console.print(full_text, highlight=False)
+
+        total_tokens = 0
+        if response.usage_metadata:
+            total_tokens = (
+                (response.usage_metadata.prompt_token_count or 0)
+                + (response.usage_metadata.candidates_token_count or 0)
+            )
+        if total_tokens == 0:
+            total_tokens = len(full_text) // 4
+
+        return full_text, total_tokens
+
+    def _stream_openai(
+        self, system: str, user_prompt: str, max_tokens: int, label: str
+    ) -> tuple[str, int]:
+        """Stream an OpenAI GPT response to terminal. Returns (text, token_count)."""
+        full_text = ""
+        total_tokens = 0
+
+        console.print(f"\n[bold #00ff88]>>> {label} [GPT-4o][/bold #00ff88]\n")
+
+        stream = self.openai_client.chat.completions.create(
+            model=self.model,
+            max_tokens=max_tokens,
+            temperature=0.7,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_prompt},
+            ],
+            stream=True,
+        )
+
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                text = chunk.choices[0].delta.content
+                full_text += text
+                console.print(text, end="", highlight=False)
+            if chunk.usage:
+                total_tokens = chunk.usage.total_tokens
+
+        if total_tokens == 0:
+            total_tokens = len(full_text) // 4
+
+        console.print()
+        return full_text, total_tokens
+
     def _stream_response(
         self, system: str, user_prompt: str, max_tokens: int, label: str
     ) -> tuple[str, int]:
         """Route to the active provider's streaming method."""
         if self.provider == "deepseek":
             return self._stream_deepseek(system, user_prompt, max_tokens, label)
-        return self._stream_anthropic(system, user_prompt, max_tokens, label)
+        elif self.provider == "anthropic":
+            return self._stream_anthropic(system, user_prompt, max_tokens, label)
+        elif self.provider == "gemini":
+            return self._stream_gemini(system, user_prompt, max_tokens, label)
+        elif self.provider == "openai":
+            return self._stream_openai(system, user_prompt, max_tokens, label)
+        raise ValueError(f"Unknown provider: {self.provider}")
 
     def _build_funding_range(self, grant: Grant) -> str:
         """Format funding range string for prompts."""
