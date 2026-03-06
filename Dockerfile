@@ -12,14 +12,17 @@ COPY src/ src/
 
 RUN pip install --no-cache-dir -e ".[all]" 2>/dev/null || pip install --no-cache-dir -e .
 
-# Create data dir
-RUN mkdir -p data profiles proposals
+# Create data dirs
+RUN mkdir -p data profiles proposals templates
 
-# Copy profiles if they exist
+# Copy profiles and templates if they exist
 COPY profiles/ profiles/ 2>/dev/null || true
+COPY templates/ templates/ 2>/dev/null || true
 
-EXPOSE 8501
+# Init DB on build
+RUN au-grants init || true
 
-# Default: CLI mode
-ENTRYPOINT ["au-grants"]
-CMD ["--help"]
+EXPOSE 8000 8501
+
+# Default: API server
+CMD ["python", "-m", "uvicorn", "au_grants_agent.api:app", "--host", "0.0.0.0", "--port", "8000"]

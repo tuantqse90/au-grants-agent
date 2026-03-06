@@ -414,3 +414,14 @@ def health() -> dict:
         "provider": settings.llm_provider,
         "timestamp": datetime.utcnow().isoformat(),
     }
+
+
+@app.get("/", tags=["System"])
+def root() -> dict:
+    """Root endpoint — redirects to docs."""
+    return {
+        "name": "AU Grants Agent API",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "health": "/health",
+    }
