@@ -8,6 +8,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from au_grants_agent.config import settings
@@ -416,12 +417,8 @@ def health() -> dict:
     }
 
 
-@app.get("/", tags=["System"])
-def root() -> dict:
-    """Root endpoint — redirects to docs."""
-    return {
-        "name": "AU Grants Agent API",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "health": "/health",
-    }
+@app.get("/", response_class=HTMLResponse, tags=["System"])
+def root() -> str:
+    """Dashboard UI."""
+    from au_grants_agent.dashboard import DASHBOARD_HTML
+    return DASHBOARD_HTML
