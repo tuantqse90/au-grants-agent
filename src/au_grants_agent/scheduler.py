@@ -10,14 +10,17 @@ from apscheduler.triggers.cron import CronTrigger
 from rich.console import Console
 
 from au_grants_agent.config import settings
-from au_grants_agent.crawler import ARCCrawler, BusinessGovCrawler, GrantsGovCrawler, NHMRCCrawler
+from au_grants_agent.crawler import (
+    ARCCrawler, ARENACrawler, BusinessGovCrawler,
+    GrantsGovCrawler, NHMRCCrawler, NSWGovCrawler,
+)
 from au_grants_agent.database import Database
 from au_grants_agent.utils.logger import get_logger
 
 logger = get_logger()
 console = Console()
 
-CRAWLER_CLASSES = [GrantsGovCrawler, BusinessGovCrawler, ARCCrawler, NHMRCCrawler]
+CRAWLER_CLASSES = [GrantsGovCrawler, BusinessGovCrawler, ARCCrawler, NHMRCCrawler, NSWGovCrawler, ARENACrawler]
 
 
 def _run_crawl_job() -> None:

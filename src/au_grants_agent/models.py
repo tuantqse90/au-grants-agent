@@ -43,6 +43,19 @@ class Proposal(BaseModel):
     generated_at: Optional[str] = None
 
 
+class GrantTracking(BaseModel):
+    """Tracking status for a grant the user is interested in."""
+
+    id: str = Field(description="Internal UUID")
+    grant_id: str
+    interest: str = "interested"  # interested, applied, rejected, won, lost
+    notes: Optional[str] = None
+    priority: int = 0  # 0=normal, 1=high, 2=urgent
+    deadline_reminder: Optional[str] = None  # date for reminder
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
 class CrawlResult(BaseModel):
     """Summary of a single crawl session."""
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from au_grants_agent.config import settings
-from au_grants_agent.models import CrawlResult, Grant, Proposal
+from au_grants_agent.models import CrawlResult, Grant, GrantTracking, Proposal
 from au_grants_agent.utils.logger import get_logger
 
 logger = get_logger()
@@ -43,6 +43,17 @@ CREATE TABLE IF NOT EXISTS proposals (
     model TEXT,
     tokens_used INTEGER,
     generated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS grant_tracking (
+    id TEXT PRIMARY KEY,
+    grant_id TEXT REFERENCES grants(id),
+    interest TEXT DEFAULT 'interested',
+    notes TEXT,
+    priority INTEGER DEFAULT 0,
+    deadline_reminder TEXT,
+    created_at TEXT,
+    updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS crawl_logs (
@@ -179,6 +190,100 @@ class Database:
                 "top_categories": {r["category"]: r["cnt"] for r in categories},
                 "total_proposals": proposals_count,
             }
+
+    # ── Grant Tracking ────────────────────────────────────────────
+
+    def track_grant(self, grant_id: str, interest: str = "interested",
+                    notes: Optional[str] = None, priority: int = 0) -> GrantTracking:
+        """Add or update tracking for a grant."""
+        import uuid
+        now = datetime.utcnow().isoformat()
+
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT * FROM grant_tracking WHERE grant_id = ?", (grant_id,)
+            ).fetchone()
+
+            if existing:
+                conn.execute(
+                    """UPDATE grant_tracking SET interest=?, notes=?, priority=?, updated_at=?
+                    WHERE grant_id=?""",
+                    (interest, notes or existing["notes"], priority, now, grant_id),
+                )
+                return GrantTracking(
+                    id=existing["id"], grant_id=grant_id, interest=interest,
+                    notes=notes or existing["notes"], priority=priority,
+                    created_at=existing["created_at"], updated_at=now,
+                )
+            else:
+                tracking_id = str(uuid.uuid4())
+                conn.execute(
+                    """INSERT INTO grant_tracking
+                        (id, grant_id, interest, notes, priority, created_at, updated_at)
+                    VALUES (?,?,?,?,?,?,?)""",
+                    (tracking_id, grant_id, interest, notes, priority, now, now),
+                )
+                return GrantTracking(
+                    id=tracking_id, grant_id=grant_id, interest=interest,
+                    notes=notes, priority=priority, created_at=now, updated_at=now,
+                )
+
+    def untrack_grant(self, grant_id: str) -> bool:
+        """Remove tracking for a grant. Returns True if existed."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM grant_tracking WHERE grant_id = ?", (grant_id,)
+            )
+            return cursor.rowcount > 0
+
+    def get_tracking(self, grant_id: str) -> Optional[GrantTracking]:
+        """Get tracking info for a grant."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM grant_tracking WHERE grant_id = ?", (grant_id,)
+            ).fetchone()
+            if row:
+                return GrantTracking(**dict(row))
+        return None
+
+    def list_tracked(self, interest: Optional[str] = None) -> list[tuple[GrantTracking, Grant]]:
+        """List all tracked grants with their grant details."""
+        query = """
+            SELECT t.*, g.title, g.agency, g.category, g.closing_date, g.status,
+                   g.source_url, g.source, g.go_id, g.description, g.eligibility,
+                   g.amount_min, g.amount_max, g.raw_html, g.crawled_at,
+                   g.updated_at as g_updated_at
+            FROM grant_tracking t
+            JOIN grants g ON t.grant_id = g.id
+        """
+        params: list = []
+        if interest:
+            query += " WHERE t.interest = ?"
+            params.append(interest)
+        query += " ORDER BY t.priority DESC, g.closing_date ASC"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+            results = []
+            for r in rows:
+                d = dict(r)
+                tracking = GrantTracking(
+                    id=d["id"], grant_id=d["grant_id"], interest=d["interest"],
+                    notes=d["notes"], priority=d["priority"],
+                    created_at=d["created_at"], updated_at=d["updated_at"],
+                )
+                grant = Grant(
+                    id=d["grant_id"], go_id=d["go_id"], title=d["title"],
+                    agency=d["agency"], description=d["description"],
+                    category=d["category"], amount_min=d["amount_min"],
+                    amount_max=d["amount_max"], closing_date=d["closing_date"],
+                    eligibility=d["eligibility"], status=d["status"],
+                    source_url=d["source_url"], source=d["source"],
+                    raw_html=d["raw_html"], crawled_at=d["crawled_at"],
+                    updated_at=d["g_updated_at"],
+                )
+                results.append((tracking, grant))
+            return results
 
     # ── Proposal CRUD ───────────────────────────────────────────
 

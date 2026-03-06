@@ -96,7 +96,7 @@ def config(ctx: Context) -> None:
 # ── crawl ───────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("--source", type=click.Choice(["grants.gov.au", "business.gov.au", "arc.gov.au", "nhmrc.gov.au"]), help="Crawl a specific source")
+@click.option("--source", type=click.Choice(["grants.gov.au", "business.gov.au", "arc.gov.au", "nhmrc.gov.au", "nsw.gov.au", "arena.gov.au"]), help="Crawl a specific source")
 @click.option("--category", default=None, help="Filter by category")
 @click.option("--dry-run", is_flag=True, help="Fetch & parse without saving")
 @pass_ctx
@@ -104,21 +104,29 @@ def crawl(ctx: Context, source: Optional[str], category: Optional[str], dry_run:
     """Crawl Australian Government grant websites."""
     from rich.progress import Progress, SpinnerColumn, TextColumn
 
-    from au_grants_agent.crawler import ARCCrawler, BusinessGovCrawler, GrantsGovCrawler, NHMRCCrawler
+    from au_grants_agent.crawler import (
+        ARCCrawler, ARENACrawler, BusinessGovCrawler,
+        GrantsGovCrawler, NHMRCCrawler, NSWGovCrawler,
+    )
     from au_grants_agent.database import Database
 
     db = Database()
     db.init_db()
 
+    source_map = {
+        "grants.gov.au": GrantsGovCrawler,
+        "business.gov.au": BusinessGovCrawler,
+        "arc.gov.au": ARCCrawler,
+        "nhmrc.gov.au": NHMRCCrawler,
+        "nsw.gov.au": NSWGovCrawler,
+        "arena.gov.au": ARENACrawler,
+    }
+
     crawlers = []
-    if source == "grants.gov.au" or source is None:
-        crawlers.append(GrantsGovCrawler(db=db))
-    if source == "business.gov.au" or source is None:
-        crawlers.append(BusinessGovCrawler(db=db))
-    if source == "arc.gov.au" or source is None:
-        crawlers.append(ARCCrawler(db=db))
-    if source == "nhmrc.gov.au" or source is None:
-        crawlers.append(NHMRCCrawler(db=db))
+    if source:
+        crawlers.append(source_map[source](db=db))
+    else:
+        crawlers = [cls(db=db) for cls in source_map.values()]
 
     async def run_crawl():
         results = []
@@ -519,6 +527,116 @@ def match(
     console.print(table)
 
 
+# ── track ──────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("grant_id")
+@click.option("--interest", default="interested",
+              type=click.Choice(["interested", "applied", "rejected", "won", "lost"]),
+              help="Interest status")
+@click.option("--notes", default=None, help="Add notes")
+@click.option("--priority", default=0, type=click.IntRange(0, 2),
+              help="Priority: 0=normal, 1=high, 2=urgent")
+@pass_ctx
+def track(ctx: Context, grant_id: str, interest: str, notes: Optional[str], priority: int) -> None:
+    """Mark a grant as tracked with interest status."""
+    from au_grants_agent.database import Database
+
+    db = Database()
+    grant = db.get_grant(grant_id)
+    if not grant:
+        grants = db.list_grants()
+        for g in grants:
+            if g.id.startswith(grant_id):
+                grant = g
+                break
+    if not grant:
+        console.print(f"[red]Grant '{grant_id}' not found.[/red]")
+        return
+
+    tracking = db.track_grant(grant.id, interest=interest, notes=notes, priority=priority)
+    priority_labels = {0: "Normal", 1: "High", 2: "Urgent"}
+    console.print(Panel(
+        f"[bold]Grant:[/bold] {grant.title[:60]}\n"
+        f"[bold]Status:[/bold] {tracking.interest}\n"
+        f"[bold]Priority:[/bold] {priority_labels[tracking.priority]}\n"
+        f"[bold]Notes:[/bold] {tracking.notes or 'None'}",
+        title="[#00ff88]Grant Tracked[/#00ff88]",
+        border_style="#00ff88",
+    ))
+
+
+@cli.command()
+@click.argument("grant_id")
+@pass_ctx
+def untrack(ctx: Context, grant_id: str) -> None:
+    """Remove tracking for a grant."""
+    from au_grants_agent.database import Database
+
+    db = Database()
+    # Support partial ID
+    full_id = grant_id
+    grant = db.get_grant(grant_id)
+    if not grant:
+        grants = db.list_grants()
+        for g in grants:
+            if g.id.startswith(grant_id):
+                full_id = g.id
+                break
+
+    if db.untrack_grant(full_id):
+        console.print(f"[#00ff88]Removed tracking for {grant_id[:8]}[/#00ff88]")
+    else:
+        console.print(f"[yellow]Grant '{grant_id[:8]}' was not tracked.[/yellow]")
+
+
+@cli.command()
+@click.option("--interest", default=None,
+              type=click.Choice(["interested", "applied", "rejected", "won", "lost"]),
+              help="Filter by interest status")
+@pass_ctx
+def tracked(ctx: Context, interest: Optional[str]) -> None:
+    """List all tracked grants."""
+    from au_grants_agent.database import Database
+
+    db = Database()
+    db.init_db()
+    results = db.list_tracked(interest=interest)
+
+    if not results:
+        console.print("[yellow]No tracked grants. Use 'au-grants track GRANT_ID' to start tracking.[/yellow]")
+        return
+
+    table = Table(title=f"Tracked Grants ({len(results)})", border_style="#00ff88", show_lines=True)
+    table.add_column("ID", style="dim", max_width=10)
+    table.add_column("Title", max_width=40)
+    table.add_column("Interest", width=12)
+    table.add_column("Priority", width=8, justify="center")
+    table.add_column("Closing", width=12, justify="center")
+    table.add_column("Notes", max_width=30)
+    table.add_column("Source")
+
+    priority_labels = {0: "Normal", 1: "[yellow]High[/yellow]", 2: "[red]Urgent[/red]"}
+    interest_colors = {
+        "interested": "cyan", "applied": "green", "rejected": "dim",
+        "won": "bold green", "lost": "dim red",
+    }
+
+    for tracking, grant in results:
+        ic = interest_colors.get(tracking.interest, "white")
+        table.add_row(
+            grant.id[:8],
+            grant.title[:40],
+            f"[{ic}]{tracking.interest}[/{ic}]",
+            priority_labels.get(tracking.priority, "Normal"),
+            grant.closing_date or "",
+            (tracking.notes or "")[:30],
+            grant.source or "",
+        )
+
+    console.print(table)
+
+
 # ── propose ─────────────────────────────────────────────────────
 
 @cli.command()
@@ -655,7 +773,10 @@ def validate(ctx: Context, file_path: str) -> None:
 @pass_ctx
 def pipeline(ctx: Context, top_n: int, fmt: str, org: Optional[str], profile_name: Optional[str], no_refine: bool) -> None:
     """Full pipeline: crawl -> rank by deadline -> generate proposals."""
-    from au_grants_agent.crawler import ARCCrawler, BusinessGovCrawler, GrantsGovCrawler, NHMRCCrawler
+    from au_grants_agent.crawler import (
+        ARCCrawler, ARENACrawler, BusinessGovCrawler,
+        GrantsGovCrawler, NHMRCCrawler, NSWGovCrawler,
+    )
     from au_grants_agent.database import Database
     from au_grants_agent.proposal.exporter import ProposalExporter
     from au_grants_agent.proposal.generator import ProposalGenerator
@@ -684,7 +805,7 @@ def pipeline(ctx: Context, top_n: int, fmt: str, org: Optional[str], profile_nam
     console.print("[bold #00ff88]Step 1: Crawling grant sources...[/bold #00ff88]")
 
     async def do_crawl():
-        for CrawlerClass in [GrantsGovCrawler, BusinessGovCrawler, ARCCrawler, NHMRCCrawler]:
+        for CrawlerClass in [GrantsGovCrawler, BusinessGovCrawler, ARCCrawler, NHMRCCrawler, NSWGovCrawler, ARENACrawler]:
             crawler = CrawlerClass(db=db)
             result = await crawler.crawl()
             console.print(
@@ -887,6 +1008,226 @@ def report(ctx: Context, profile_name: str, top_n: int, min_score: float, output
         output_dir=out_dir,
     )
     console.print(f"[#00ff88]Report saved: {path}[/#00ff88]")
+
+
+# ── template ──────────────────────────────────────────────────
+
+@cli.group()
+def template() -> None:
+    """Manage proposal template library."""
+    pass
+
+
+@template.command("list")
+@click.option("--category", default=None, help="Filter by category (research, business, community)")
+def template_list(category: Optional[str]) -> None:
+    """List available proposal templates."""
+    from au_grants_agent.proposal.template_library import list_templates
+
+    templates = list_templates(category=category)
+    if not templates:
+        console.print("[yellow]No templates found. Run 'au-grants template examples' to create starter templates.[/yellow]")
+        return
+
+    table = Table(title=f"Proposal Templates ({len(templates)})", border_style="#00ff88")
+    table.add_column("Name", style="bold")
+    table.add_column("Category")
+    table.add_column("Type")
+    table.add_column("Sections", justify="center")
+    table.add_column("Tags")
+
+    for t in templates:
+        table.add_row(
+            t["name"],
+            t["category"],
+            t["grant_type"],
+            str(t["sections"]),
+            ", ".join(t["tags"][:3]),
+        )
+    console.print(table)
+
+
+@template.command("show")
+@click.argument("name")
+def template_show(name: str) -> None:
+    """Show a template's content."""
+    from au_grants_agent.proposal.template_library import load_template
+
+    try:
+        t = load_template(name)
+    except FileNotFoundError:
+        console.print(f"[red]Template '{name}' not found.[/red]")
+        return
+
+    content = (
+        f"[bold]Name:[/bold] {t.get('name', 'N/A')}\n"
+        f"[bold]Category:[/bold] {t.get('category', 'N/A')}\n"
+        f"[bold]Type:[/bold] {t.get('grant_type', 'N/A')}\n"
+        f"[bold]Description:[/bold] {t.get('description', 'N/A')}\n"
+        f"[bold]Tags:[/bold] {', '.join(t.get('tags', []))}\n"
+        f"[bold]Sections:[/bold] {len(t.get('sections', []))}\n"
+    )
+    console.print(Panel(content, title=f"[#00ff88]Template: {t.get('name', name)}[/#00ff88]", border_style="#00ff88"))
+
+    for s in t.get("sections", []):
+        console.print(f"\n[bold #00ff88]## {s['title']}[/bold #00ff88]")
+        preview = s.get("body", "")[:200]
+        if len(s.get("body", "")) > 200:
+            preview += "..."
+        console.print(f"[dim]{preview}[/dim]")
+
+
+@template.command("save")
+@click.argument("file_path", type=click.Path(exists=True))
+@click.option("--name", prompt="Template name", help="Name for the template")
+@click.option("--category", default="research", type=click.Choice(["research", "business", "community"]))
+@click.option("--description", "desc", default="", help="Short description")
+@click.option("--tags", default="", help="Comma-separated tags")
+def template_save(file_path: str, name: str, category: str, desc: str, tags: str) -> None:
+    """Save a proposal file as a reusable template."""
+    from au_grants_agent.proposal.template_library import save_template
+
+    content = Path(file_path).read_text(encoding="utf-8")
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+
+    path = save_template(
+        name=name, content=content, category=category,
+        description=desc, tags=tag_list,
+    )
+    console.print(f"[#00ff88]Template saved: {path}[/#00ff88]")
+
+
+@template.command("examples")
+def template_examples() -> None:
+    """Create example templates for each category."""
+    from au_grants_agent.proposal.template_library import create_example_templates
+
+    paths = create_example_templates()
+    for p in paths:
+        console.print(f"[#00ff88]Created: {p}[/#00ff88]")
+    console.print(f"\n[dim]Templates saved in templates/ directory. Use 'au-grants template list' to view.[/dim]")
+
+
+@template.command("delete")
+@click.argument("name")
+def template_delete(name: str) -> None:
+    """Delete a template."""
+    from au_grants_agent.proposal.template_library import delete_template
+
+    if delete_template(name):
+        console.print(f"[#00ff88]Deleted template: {name}[/#00ff88]")
+    else:
+        console.print(f"[yellow]Template '{name}' not found.[/yellow]")
+
+
+# ── analytics ─────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--days", default=90, help="Days ahead for closing timeline")
+@pass_ctx
+def analytics(ctx: Context, days: int) -> None:
+    """Show detailed analytics dashboard with trends."""
+    from au_grants_agent.analytics import get_closing_timeline, get_crawl_history, get_funding_trends
+    from au_grants_agent.database import Database
+
+    db = Database()
+
+    # Funding trends
+    trends = get_funding_trends(db)
+    table = Table(title="Funding Distribution", border_style="#00ff88")
+    table.add_column("Amount Range", style="bold")
+    table.add_column("Count", justify="right")
+    table.add_column("Bar")
+    max_count = max(trends["amount_distribution"].values()) if trends["amount_distribution"] else 1
+    for bucket, count in trends["amount_distribution"].items():
+        bar_len = int(count / max_count * 20) if max_count > 0 else 0
+        table.add_row(bucket, str(count), "[#00ff88]" + "█" * bar_len + "[/#00ff88]")
+    console.print(table)
+
+    # Status
+    console.print()
+    status_table = Table(title="Status Breakdown", border_style="#00ff88")
+    status_table.add_column("Status", style="bold")
+    status_table.add_column("Count", justify="right")
+    for status, count in trends["status_breakdown"].items():
+        color = "green" if status == "Open" else "dim"
+        status_table.add_row(f"[{color}]{status}[/{color}]", str(count))
+    console.print(status_table)
+
+    # Top agencies
+    console.print()
+    agency_table = Table(title="Top Agencies", border_style="#00ff88")
+    agency_table.add_column("Agency", max_width=40)
+    agency_table.add_column("Grants", justify="right")
+    for agency, count in list(trends["top_agencies"].items())[:10]:
+        agency_table.add_row(agency[:40], str(count))
+    console.print(agency_table)
+
+    # Closing timeline
+    console.print()
+    timeline = get_closing_timeline(db, days_ahead=days)
+    console.print(Panel(
+        f"[bold]Closing in next {days} days:[/bold] {timeline['total_closing']}\n"
+        f"[bold]Urgent (next 7 days):[/bold] [red]{len(timeline['urgent_next_7_days'])}[/red]\n"
+        f"[bold]Overdue:[/bold] {timeline['overdue']}\n"
+        f"[bold]No closing date:[/bold] {timeline['no_closing_date']}",
+        title="[#00ff88]Closing Timeline[/#00ff88]",
+        border_style="#00ff88",
+    ))
+
+    if timeline["urgent_next_7_days"]:
+        urgent_table = Table(title="Urgent — Closing in 7 Days", border_style="red")
+        urgent_table.add_column("ID", style="dim", width=10)
+        urgent_table.add_column("Title", max_width=50)
+        urgent_table.add_column("Closing", justify="center")
+        for item in timeline["urgent_next_7_days"][:10]:
+            urgent_table.add_row(item["id"], item["title"], item["date"])
+        console.print(urgent_table)
+
+    # Crawl history
+    console.print()
+    crawl_data = get_crawl_history(db)
+    if crawl_data["source_stats"]:
+        crawl_table = Table(title="Crawl Source Stats", border_style="#00ff88")
+        crawl_table.add_column("Source", style="bold")
+        crawl_table.add_column("Crawls", justify="right")
+        crawl_table.add_column("Total Found", justify="right")
+        crawl_table.add_column("New", justify="right")
+        crawl_table.add_column("Errors", justify="right")
+        crawl_table.add_column("Avg Duration", justify="right")
+        crawl_table.add_column("Last Crawl")
+
+        for source, s in crawl_data["source_stats"].items():
+            err_style = "red" if s["errors"] > 0 else "green"
+            crawl_table.add_row(
+                source,
+                str(s["total_crawls"]),
+                str(s["total_found"]),
+                str(s["total_new"]),
+                f"[{err_style}]{s['errors']}[/{err_style}]",
+                f"{s['avg_duration']}s",
+                (s["last_crawl"] or "")[:19],
+            )
+        console.print(crawl_table)
+
+
+# ── api ────────────────────────────────────────────────────────
+
+@cli.command("api")
+@click.option("--host", default="0.0.0.0", help="Host to bind")
+@click.option("--port", default=8000, help="Port for API server")
+@click.option("--reload", "do_reload", is_flag=True, help="Auto-reload on code changes")
+@pass_ctx
+def api_server(ctx: Context, host: str, port: int, do_reload: bool) -> None:
+    """Launch the FastAPI REST API server."""
+    import uvicorn
+
+    console.print(f"[#00ff88]Starting API server on {host}:{port}...[/#00ff88]")
+    console.print(f"[dim]Docs: http://localhost:{port}/docs[/dim]")
+    uvicorn.run(
+        "au_grants_agent.api:app",
+        host=host, port=port, reload=do_reload,
+    )
 
 
 # ── web ────────────────────────────────────────────────────────

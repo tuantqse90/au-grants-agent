@@ -28,6 +28,21 @@ services:
     entrypoint: ["python", "-m", "streamlit", "run", "src/au_grants_agent/web.py"]
     command: ["--server.port", "8501", "--server.headless", "true", "--server.address", "0.0.0.0"]
 
+  # REST API — FastAPI server
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./profiles:/app/profiles
+      - ./proposals:/app/proposals
+      - ./templates:/app/templates
+    entrypoint: ["au-grants"]
+    command: ["api", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+
   # Scheduler — daily auto-crawl
   scheduler:
     build: .
