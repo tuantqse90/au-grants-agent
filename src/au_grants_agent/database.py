@@ -1,4 +1,4 @@
-"""SQLite database CRUD operations."""
+"""Database CRUD operations with SQLite/PostgreSQL dual backend."""
 
 from __future__ import annotations
 
@@ -69,14 +69,129 @@ CREATE TABLE IF NOT EXISTS crawl_logs (
 );
 """
 
+# PostgreSQL schema (individual statements; SERIAL replaces AUTOINCREMENT)
+PG_SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS grants (
+        id TEXT PRIMARY KEY,
+        go_id TEXT UNIQUE,
+        title TEXT NOT NULL,
+        agency TEXT,
+        description TEXT,
+        category TEXT,
+        amount_min REAL,
+        amount_max REAL,
+        closing_date TEXT,
+        eligibility TEXT,
+        status TEXT DEFAULT 'Open',
+        source_url TEXT,
+        source TEXT,
+        raw_html TEXT,
+        crawled_at TEXT,
+        updated_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS proposals (
+        id TEXT PRIMARY KEY,
+        grant_id TEXT REFERENCES grants(id),
+        org_name TEXT,
+        focus_area TEXT,
+        content_en TEXT,
+        summary_vi TEXT,
+        model TEXT,
+        tokens_used INTEGER,
+        generated_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS grant_tracking (
+        id TEXT PRIMARY KEY,
+        grant_id TEXT REFERENCES grants(id),
+        interest TEXT DEFAULT 'interested',
+        notes TEXT,
+        priority INTEGER DEFAULT 0,
+        deadline_reminder TEXT,
+        created_at TEXT,
+        updated_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS crawl_logs (
+        id SERIAL PRIMARY KEY,
+        source TEXT,
+        status TEXT,
+        grants_found INTEGER,
+        grants_new INTEGER,
+        grants_updated INTEGER,
+        duration_seconds REAL,
+        error_message TEXT,
+        crawled_at TEXT
+    )""",
+]
+
+
+# ── PostgreSQL compatibility layer ─────────────────────────────
+
+
+class _RowProxy(dict):
+    """Dict subclass that also supports integer-index access like sqlite3.Row."""
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+class _CursorProxy:
+    """Wraps a psycopg2 cursor to match the sqlite3 cursor interface."""
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.rowcount = cursor.rowcount
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        return _RowProxy(row) if row else None
+
+    def fetchall(self):
+        return [_RowProxy(r) for r in self._cursor.fetchall()]
+
+
+class _PgConnectionProxy:
+    """Wraps a psycopg2 connection to match the sqlite3 connection interface."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=None):
+        from psycopg2.extras import RealDictCursor
+
+        sql = sql.replace("?", "%s")
+        cur = self._conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(sql, params)
+        return _CursorProxy(cur)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            self._conn.commit()
+        else:
+            self._conn.rollback()
+        self._conn.close()
+        return False
+
 
 class Database:
-    """SQLite database manager."""
+    """Database manager with SQLite/PostgreSQL dual backend."""
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
+        self.use_postgres = settings.use_postgres
+        self.database_url = settings.database_url if self.use_postgres else ""
         self.db_path = db_path or settings.db_path
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self):
+        """Return a connection (proxy for PostgreSQL, raw for SQLite)."""
+        if self.use_postgres:
+            import psycopg2
+
+            conn = psycopg2.connect(self.database_url)
+            return _PgConnectionProxy(conn)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
@@ -85,9 +200,15 @@ class Database:
 
     def init_db(self) -> None:
         """Create all tables."""
-        with self._connect() as conn:
-            conn.executescript(SCHEMA)
-        logger.info("Database initialized at %s", self.db_path)
+        if self.use_postgres:
+            with self._connect() as conn:
+                for stmt in PG_SCHEMA:
+                    conn.execute(stmt)
+            logger.info("Database initialized (PostgreSQL)")
+        else:
+            with self._connect() as conn:
+                conn.executescript(SCHEMA)
+            logger.info("Database initialized at %s", self.db_path)
 
     # ── Grant CRUD ──────────────────────────────────────────────
 

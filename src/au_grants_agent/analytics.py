@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from typing import Optional

@@ -43,7 +43,8 @@ class Settings:
         self.smtp_password: str = os.getenv("SMTP_PASSWORD", "")
         self.notify_to: str = os.getenv("NOTIFY_TO", "")
 
-        # General
+        # Database
+        self.database_url: str = os.getenv("DATABASE_URL", "")
         self.db_path: Path = Path(os.getenv("DB_PATH", "data/grants.db"))
         self.crawl_delay: float = float(os.getenv("CRAWL_DELAY", "2.5"))
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO")
@@ -90,6 +91,11 @@ class Settings:
             "gemini": self.gemini_model,
             "openai": self.openai_model,
         }.get(provider, "")
+
+    @property
+    def use_postgres(self) -> bool:
+        """True when DATABASE_URL is set (e.g. Railway PostgreSQL addon)."""
+        return bool(self.database_url)
 
     @property
     def provider_display(self) -> str:
