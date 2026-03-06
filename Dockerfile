@@ -18,7 +18,10 @@ RUN mkdir -p data profiles proposals templates
 # Init DB on build
 RUN au-grants init || true
 
+COPY start.sh .
+RUN chmod +x start.sh
+
 EXPOSE 8000 8501
 
 # Default: API server
-CMD ["python", "-m", "uvicorn", "au_grants_agent.api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "start.sh"]
