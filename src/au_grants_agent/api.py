@@ -8,7 +8,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from au_grants_agent.config import settings
@@ -125,6 +125,18 @@ class ProposeResponse(BaseModel):
     words: int
     model: Optional[str] = None
     tokens_used: Optional[int] = None
+
+
+class ProposalContentResponse(BaseModel):
+    id: str
+    grant_id: str
+    org_name: Optional[str] = None
+    focus_area: Optional[str] = None
+    content_en: Optional[str] = None
+    summary_vi: Optional[str] = None
+    model: Optional[str] = None
+    tokens_used: Optional[int] = None
+    generated_at: Optional[str] = None
 
 
 # ── Grant Endpoints ──────────────────────────────────────────
@@ -346,6 +358,66 @@ def generate_proposal(grant_id: str, request: ProposeRequest) -> ProposeResponse
     )
 
 
+@app.get("/api/proposals", response_model=list[ProposalContentResponse], tags=["Proposals"])
+def list_proposals(
+    limit: int = Query(50, ge=1, le=200),
+) -> list[ProposalContentResponse]:
+    """List all generated proposals (most recent first)."""
+    db = get_db()
+    proposals = db.list_proposals(limit=limit)
+    return [ProposalContentResponse(**p.model_dump()) for p in proposals]
+
+
+@app.get("/api/proposals/{proposal_id}", response_model=ProposalContentResponse, tags=["Proposals"])
+def get_proposal(proposal_id: str) -> ProposalContentResponse:
+    """Get full proposal content by ID."""
+    db = get_db()
+    proposal = db.get_proposal(proposal_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found")
+    return ProposalContentResponse(**proposal.model_dump())
+
+
+@app.get("/api/proposals/{proposal_id}/export", tags=["Proposals"])
+def export_proposal(
+    proposal_id: str,
+    format: str = Query("docx", description="Export format: docx or pdf"),
+):
+    """Export a proposal as DOCX or PDF file."""
+    import io
+    from au_grants_agent.proposal.exporter import ProposalExporter
+
+    db = get_db()
+    proposal = db.get_proposal(proposal_id)
+    if not proposal:
+        raise HTTPException(404, f"Proposal '{proposal_id}' not found")
+    grant = db.get_grant(proposal.grant_id)
+    if not grant:
+        raise HTTPException(404, f"Grant '{proposal.grant_id}' not found")
+
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        exporter = ProposalExporter(output_dir=Path(tmpdir))
+        if format == "pdf":
+            filepath = exporter.export_pdf(grant, proposal)
+            media_type = "application/pdf"
+        elif format == "docx":
+            filepath = exporter.export_docx(grant, proposal)
+            media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        else:
+            raise HTTPException(400, f"Unsupported format: {format}. Use 'docx' or 'pdf'.")
+
+        content = filepath.read_bytes()
+
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filepath.name}"'},
+    )
+
+
 # ── Template Endpoints ───────────────────────────────────────
 
 @app.get("/api/templates", tags=["Templates"])
@@ -400,6 +472,198 @@ def get_crawl_history(
     """Get crawl history and source stats."""
     from au_grants_agent.analytics import get_crawl_history as _get
     return _get(get_db(), limit=limit)
+
+
+# ── Scheduler Endpoints ──────────────────────────────────────
+
+_bg_scheduler = None  # module-level ref for background scheduler
+
+
+class SchedulerRequest(BaseModel):
+    enabled: bool = True
+    cron_hour: int = 6
+    cron_minute: int = 0
+    notify_profile: Optional[str] = None
+
+
+@app.post("/api/scheduler", tags=["Scheduler"])
+def set_scheduler(request: SchedulerRequest) -> dict:
+    """Start or stop the background auto-crawl scheduler."""
+    global _bg_scheduler
+
+    if not request.enabled:
+        if _bg_scheduler:
+            _bg_scheduler.shutdown(wait=False)
+            _bg_scheduler = None
+        return {"status": "stopped"}
+
+    # Start background scheduler
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.cron import CronTrigger
+
+    if _bg_scheduler:
+        _bg_scheduler.shutdown(wait=False)
+
+    _bg_scheduler = BackgroundScheduler()
+
+    from au_grants_agent.scheduler import _run_crawl_job, _run_notify_job
+    _bg_scheduler.add_job(
+        _run_crawl_job,
+        trigger=CronTrigger(hour=request.cron_hour, minute=request.cron_minute),
+        id="daily_crawl", name="Daily Grant Crawl", replace_existing=True,
+    )
+
+    if request.notify_profile:
+        notify_min = (request.cron_minute + 30) % 60
+        notify_hr = request.cron_hour + (1 if request.cron_minute + 30 >= 60 else 0)
+        _bg_scheduler.add_job(
+            _run_notify_job,
+            trigger=CronTrigger(hour=notify_hr, minute=notify_min),
+            id="daily_notify", name="Daily Notifications",
+            kwargs={"profile_name": request.notify_profile},
+            replace_existing=True,
+        )
+
+    _bg_scheduler.start()
+    return {
+        "status": "running",
+        "schedule": f"{request.cron_hour:02d}:{request.cron_minute:02d} daily",
+        "notify_profile": request.notify_profile,
+    }
+
+
+@app.get("/api/scheduler", tags=["Scheduler"])
+def get_scheduler_status() -> dict:
+    """Get current scheduler status."""
+    if _bg_scheduler and _bg_scheduler.running:
+        jobs = [{"id": j.id, "name": j.name, "next_run": str(j.next_run_time)} for j in _bg_scheduler.get_jobs()]
+        return {"status": "running", "jobs": jobs}
+    return {"status": "stopped", "jobs": []}
+
+
+# ── Email / Notification Endpoints ──────────────────────────
+
+class EmailConfigRequest(BaseModel):
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    notify_to: str = ""
+    use_tls: bool = True
+
+
+@app.post("/api/notify/config", tags=["Notifications"])
+def set_email_config(request: EmailConfigRequest) -> dict:
+    """Update SMTP email settings (runtime only)."""
+    import os
+    os.environ["SMTP_HOST"] = request.smtp_host
+    os.environ["SMTP_PORT"] = str(request.smtp_port)
+    os.environ["SMTP_USER"] = request.smtp_user
+    if request.smtp_password:
+        os.environ["SMTP_PASSWORD"] = request.smtp_password
+    os.environ["NOTIFY_TO"] = request.notify_to
+    os.environ["SMTP_TLS"] = "true" if request.use_tls else "false"
+    return {"status": "updated", "to": request.notify_to}
+
+
+@app.get("/api/notify/config", tags=["Notifications"])
+def get_email_config() -> dict:
+    """Get current SMTP config (password masked)."""
+    import os
+    return {
+        "smtp_host": os.getenv("SMTP_HOST", "smtp.gmail.com"),
+        "smtp_port": int(os.getenv("SMTP_PORT", "587")),
+        "smtp_user": os.getenv("SMTP_USER", ""),
+        "has_password": bool(os.getenv("SMTP_PASSWORD", "")),
+        "notify_to": os.getenv("NOTIFY_TO", ""),
+        "use_tls": os.getenv("SMTP_TLS", "true").lower() == "true",
+    }
+
+
+@app.post("/api/notify/test", tags=["Notifications"])
+def send_test_email() -> dict:
+    """Send a test notification email."""
+    from au_grants_agent.notify import send_email
+    success = send_email(
+        subject="AU Grants Agent — Test Notification",
+        html_body="<h2 style='color:#00aa66'>Test successful!</h2><p>Your email notification is configured correctly.</p>",
+    )
+    if success:
+        return {"status": "sent"}
+    raise HTTPException(500, "Failed to send email. Check SMTP settings.")
+
+
+@app.post("/api/notify/digest", tags=["Notifications"])
+def send_digest_now(
+    profile_name: Optional[str] = Query(None),
+    min_score: float = Query(0.3),
+) -> dict:
+    """Send a grant matching digest email now."""
+    from au_grants_agent.notify import send_digest
+    success = send_digest(profile_name=profile_name, min_score=min_score)
+    if success:
+        return {"status": "sent"}
+    raise HTTPException(500, "Failed to send digest. Check SMTP settings and profiles.")
+
+
+# ── Compare Proposals Endpoint ──────────────────────────────
+
+class CompareRequest(BaseModel):
+    org_name: Optional[str] = None
+    focus_area: Optional[str] = None
+    providers: list[str] = ["deepseek", "anthropic"]
+    refine: bool = False
+
+
+class CompareResult(BaseModel):
+    provider: str
+    model: str
+    proposal_id: str
+    words: int
+    tokens_used: int
+
+
+@app.post("/api/grants/{grant_id}/compare", response_model=list[CompareResult], tags=["Proposals"])
+def compare_proposals(grant_id: str, request: CompareRequest) -> list[CompareResult]:
+    """Generate proposals with multiple providers for side-by-side comparison."""
+    db = get_db()
+    grant = db.get_grant(grant_id)
+    if not grant:
+        grants = db.list_grants()
+        for g in grants:
+            if g.id.startswith(grant_id):
+                grant = g
+                break
+    if not grant:
+        raise HTTPException(404, f"Grant '{grant_id}' not found")
+
+    results = []
+    for provider in request.providers:
+        if not settings.get_api_key(provider):
+            continue
+        try:
+            from au_grants_agent.proposal.generator import ProposalGenerator
+            gen = ProposalGenerator(db=db, provider=provider)
+            proposal = gen.generate(
+                grant=grant,
+                org_name=request.org_name,
+                focus_area=request.focus_area,
+                refine=request.refine,
+            )
+            words = len((proposal.content_en or "").split())
+            results.append(CompareResult(
+                provider=provider,
+                model=proposal.model or "",
+                proposal_id=proposal.id,
+                words=words,
+                tokens_used=proposal.tokens_used or 0,
+            ))
+        except Exception as e:
+            logger.error("Compare failed for %s: %s", provider, e)
+
+    if not results:
+        raise HTTPException(500, "No providers could generate. Check API keys.")
+    return results
 
 
 # ── Health ───────────────────────────────────────────────────

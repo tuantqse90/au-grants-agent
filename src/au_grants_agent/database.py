@@ -429,6 +429,13 @@ class Database:
                 return Proposal(**dict(row))
         return None
 
+    def list_proposals(self, limit: int = 50) -> list[Proposal]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM proposals ORDER BY generated_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [Proposal(**dict(r)) for r in rows]
+
     # ── Crawl Logs ──────────────────────────────────────────────
 
     def log_crawl(self, result: CrawlResult) -> None:
